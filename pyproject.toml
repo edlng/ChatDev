@@ -43,6 +43,9 @@ dependencies = [
     "mem0ai>=1.0.9",
 ]
 
+[project.optional-dependencies]
+valkey = ["valkey-glide>=1.2"]
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
