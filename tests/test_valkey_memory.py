@@ -105,8 +105,8 @@ class TestValkeyMemoryConfigFromDict:
         assert cfg.ttl_seconds is None
         assert cfg.embedding is None
 
-    def test_embedding_none_when_explicitly_null(self):
-        """Embedding config is None when explicitly set to null."""
+    def test_embedding_none_when_explicitly_none(self):
+        """Embedding config is None when explicitly set to None."""
         cfg = ValkeyMemoryConfig.from_dict({"embedding": None}, path="test")
         assert cfg.embedding is None
 
