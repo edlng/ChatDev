@@ -198,6 +198,7 @@ class ValkeyMemoryConfig(BaseConfig):
     username: str | None = None
     password: str | None = None
     db: int = 0
+    use_tls: bool = False
     index_name: str = "memory_index"
     key_prefix: str = "memory:"
     ttl_seconds: int | None = None
@@ -218,6 +219,8 @@ class ValkeyMemoryConfig(BaseConfig):
         db_value = mapping.get("db", 0)
         if not isinstance(db_value, int) or db_value < 0 or db_value > 15:
             raise ConfigError("db must be a valid database index (0-15)", extend_path(path, "db"))
+
+        use_tls = bool(mapping.get("use_tls", False))
 
         index_name = optional_str(mapping, "index_name", path) or "memory_index"
 
@@ -240,6 +243,7 @@ class ValkeyMemoryConfig(BaseConfig):
             username=username,
             password=password,
             db=db_value,
+            use_tls=use_tls,
             index_name=index_name,
             key_prefix=key_prefix,
             ttl_seconds=ttl_seconds,
@@ -288,6 +292,15 @@ class ValkeyMemoryConfig(BaseConfig):
             required=False,
             default=0,
             description="Valkey database index",
+            advance=True,
+        ),
+        "use_tls": ConfigFieldSpec(
+            name="use_tls",
+            display_name="Use TLS",
+            type_hint="bool",
+            required=False,
+            default=False,
+            description="Enable TLS encryption for the Valkey connection",
             advance=True,
         ),
         "index_name": ConfigFieldSpec(

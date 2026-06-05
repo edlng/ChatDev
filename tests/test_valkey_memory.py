@@ -486,8 +486,8 @@ class TestValkeyMemoryRetrieve:
         assert results[0].content_summary == "Python is great"
         assert results[0].metadata["source"] == "valkey"
 
-    def test_retrieve_searches_all_roles(self):
-        """retrieve() searches all memories regardless of agent_role (consistent with SimpleMemory)."""
+    def test_retrieve_filters_by_agent_role(self):
+        """retrieve() filters KNN search by agent_role when provided (spec: AEA-500)."""
         memory, client, embedding = _make_valkey_memory()
         embedding.get_embedding.return_value = [0.1, 0.2, 0.3]
         memory._glide.ft.search.return_value = []
@@ -496,8 +496,7 @@ class TestValkeyMemoryRetrieve:
         memory.retrieve("designer", query, top_k=5, similarity_threshold=-1.0)
 
         ft_query_arg = memory._glide.ft.search.call_args[0][2]
-        # Should use wildcard KNN, not role-specific filter
-        assert "*=>[KNN" in ft_query_arg
+        assert "(@agent_role:{designer})=>[KNN" in ft_query_arg
 
     def test_retrieve_threshold_filtering(self):
         """retrieve() excludes results below similarity_threshold."""

@@ -31,13 +31,14 @@ def _get_glide_sync():
         )
 
 
-def _make_client(host: str, port: int, username: str | None = None, password: str | None = None, db: int = 0):
+def _make_client(host: str, port: int, username: str | None = None, password: str | None = None, db: int = 0, use_tls: bool = False):
     glide_sync = _get_glide_sync()
     credentials = None
     if password:
         credentials = glide_sync.ServerCredentials(username=username or "default", password=password)
     config = glide_sync.GlideClientConfiguration(
         addresses=[glide_sync.NodeAddress(host, port)],
+        use_tls=use_tls,
         credentials=credentials,
         database_id=db if db != 0 else None,
     )
@@ -68,7 +69,7 @@ class ValkeyMemory(MemoryBase):
             self.embedding = None
 
         self._glide = _get_glide_sync()
-        self._client = _make_client(config.host, config.port, config.username, config.password, config.db)
+        self._client = _make_client(config.host, config.port, config.username, config.password, config.db, config.use_tls)
         self._ensure_index()
 
     # -------- Index lifecycle --------
@@ -117,6 +118,16 @@ class ValkeyMemory(MemoryBase):
             else:
                 raise
 
+    @staticmethod
+    def _sanitize_tag(value: str) -> str:
+        """Sanitize a string for use as a Valkey TAG field value."""
+        if not value:
+            return ""
+        # TAG syntax breaks on commas, braces, spaces, pipes
+        for ch in ",{}|<> \t\n\r":
+            value = value.replace(ch, "_")
+        return value
+
     # -------- Persistence (no-ops — server-side) --------
 
     def load(self) -> None:
@@ -145,7 +156,7 @@ class ValkeyMemory(MemoryBase):
             self._client.hset(key, {
                 "content_summary": text,
                 "embedding": embedding_bytes,
-                "agent_role": payload.agent_role or "",
+                "agent_role": self._sanitize_tag(payload.agent_role or ""),
                 "timestamp": str(ts),
             })
 
@@ -179,8 +190,12 @@ class ValkeyMemory(MemoryBase):
 
         top_k = max(1, int(top_k))
 
-        # Pure KNN search across all memories (consistent with SimpleMemory/Mem0 behavior)
-        ft_query = f"*=>[KNN {top_k} @embedding $vec]"
+        # Filter by agent_role when available
+        safe_role = self._sanitize_tag(agent_role)
+        if safe_role:
+            ft_query = f"(@agent_role:{{{safe_role}}})=>[KNN {top_k} @embedding $vec]"
+        else:
+            ft_query = f"*=>[KNN {top_k} @embedding $vec]"
         options = glide_sync.FtSearchOptions(
             params={"vec": query_bytes},
             dialect=2,
