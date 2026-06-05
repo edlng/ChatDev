@@ -44,7 +44,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-valkey = ["valkey-glide>=2.4"]
+valkey = ["valkey-glide-sync>=2.4"]
 
 [build-system]
 requires = ["hatchling"]
