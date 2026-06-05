@@ -31,7 +31,7 @@ def _get_glide_sync():
         )
 
 
-def _make_client(host: str, port: int, username: str | None = None,password: str | None = None, db: int = 0):
+def _make_client(host: str, port: int, username: str | None = None, password: str | None = None, db: int = 0):
     glide_sync = _get_glide_sync()
     credentials = None
     if password:
@@ -111,7 +111,7 @@ class ValkeyMemory(MemoryBase):
             elif "unknown command" in msg or "module" in msg:
                 raise RuntimeError(
                     f"Valkey server at {self.config.host}:{self.config.port} does not have the "
-                    "Search module loaded. Install valkey-search or use the valkey/valkey-bundle"
+                    "Search module loaded. Install valkey-search or use the valkey/valkey-bundle "
                     "Docker image that includes it."
                 ) from exc
             else:
