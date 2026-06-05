@@ -195,6 +195,7 @@ class ValkeyMemoryConfig(BaseConfig):
 
     host: str = "localhost"
     port: int = 6379
+    username: str | None = None
     password: str | None = None
     db: int = 0
     index_name: str = "memory_index"
@@ -211,6 +212,7 @@ class ValkeyMemoryConfig(BaseConfig):
         if not isinstance(port_value, int) or port_value < 1 or port_value > 65535:
             raise ConfigError("port must be a valid port number (1-65535)", extend_path(path, "port"))
 
+        username = optional_str(mapping, "username", path)
         password = optional_str(mapping, "password", path)
 
         db_value = mapping.get("db", 0)
@@ -235,6 +237,7 @@ class ValkeyMemoryConfig(BaseConfig):
         return cls(
             host=host,
             port=port_value,
+            username=username,
             password=password,
             db=db_value,
             index_name=index_name,
@@ -260,6 +263,14 @@ class ValkeyMemoryConfig(BaseConfig):
             required=False,
             default=6379,
             description="Valkey server port",
+        ),
+        "username": ConfigFieldSpec(
+            name="username",
+            display_name="Username",
+            type_hint="str",
+            required=False,
+            description="Valkey ACL username (required for ACL-based auth)",
+            advance=True,
         ),
         "password": ConfigFieldSpec(
             name="password",

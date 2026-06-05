@@ -1,10 +1,15 @@
-"""Tests for Valkey memory store: config validation, registry, and integration skeleton."""
+"""Tests for Valkey memory store: config validation, registry, and runtime behavior."""
 
-from unittest.mock import MagicMock, patch, AsyncMock
+import struct
+from unittest.mock import MagicMock, patch
 import pytest
 
 from entity.configs.base import ConfigError
 from entity.configs.node.memory import ValkeyMemoryConfig, EmbeddingConfig
+from runtime.node.agent.memory.memory_base import (
+    MemoryContentSnapshot,
+    MemoryWritePayload,
+)
 
 
 # =============================================================================
@@ -222,153 +227,413 @@ class TestMemoryStoreConfigValkey:
 
 
 # =============================================================================
-# Integration Test Skeleton: ValkeyMemory (requires running Valkey server)
+# Unit Tests: ValkeyMemory Runtime Behavior
 # =============================================================================
 
 
-@pytest.mark.skipif(True, reason="Integration test — requires running Valkey server with Search module")
-class TestValkeyMemoryIntegration:
-    """
-    Integration tests for ValkeyMemory.
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
-    Prerequisites:
-    - Valkey server running on localhost:6379
-    - Valkey Search module loaded (valkey-server --loadmodule valkeysearch.so)
-    - Or use the valkey/valkey-bundle Docker image which includes Search:
-      docker run -p 6379:6379 valkey/valkey-bundle:latest
-    - valkey-glide installed (pip install .[valkey])
+def _make_store(
+    host="localhost",
+    port=6379,
+    index_name="chatdev_memory",
+    ttl_seconds=None,
+):
+    """Build a minimal MemoryStoreConfig mock for ValkeyMemory."""
+    valkey_cfg = MagicMock(spec=ValkeyMemoryConfig)
+    valkey_cfg.host = host
+    valkey_cfg.port = port
+    valkey_cfg.index_name = index_name
+    valkey_cfg.ttl_seconds = ttl_seconds
+    valkey_cfg.key_prefix = "memory:"
+    valkey_cfg.username = None
+    valkey_cfg.password = None
+    valkey_cfg.db = 0
+    valkey_cfg.embedding = MagicMock()  # non-None so embedding branch is taken
 
-    Run with: pytest tests/test_valkey_memory.py::TestValkeyMemoryIntegration -v --no-header
-    """
+    store = MagicMock()
+    store.name = "test_valkey"
 
-    @pytest.fixture
-    def valkey_store(self):
-        """Create a MemoryStoreConfig for integration testing."""
-        from entity.configs.node.memory import MemoryStoreConfig
+    def _as_config_side_effect(expected_type, **kwargs):
+        if expected_type is ValkeyMemoryConfig:
+            return valkey_cfg
+        return None
 
-        data = {
-            "name": "integration_test",
-            "type": "valkey",
-            "config": {
-                "host": "localhost",
-                "port": 6379,
-                "index_name": "test_memory_idx",
-                "key_prefix": "test:memory:",
-                "ttl_seconds": 60,
-                "embedding": {
-                    "provider": "openai",
-                    "model": "text-embedding-3-small",
-                    "api_key": "test-key",
-                },
-            },
-        }
-        return MemoryStoreConfig.from_dict(data, path="integration")
+    store.as_config.side_effect = _as_config_side_effect
+    return store, valkey_cfg
 
-    @pytest.fixture
-    def memory(self, valkey_store):
-        """Create a ValkeyMemory instance and clean up after test."""
+
+def _make_valkey_memory(host="localhost", port=6379, ttl_seconds=None):
+    """Create a ValkeyMemory with mocked glide_sync client and embedding."""
+    store, valkey_cfg = _make_store(host=host, port=port, ttl_seconds=ttl_seconds)
+
+    mock_client = MagicMock()
+    mock_embedding = MagicMock()
+    mock_embedding.get_embedding.return_value = [0.1, 0.2, 0.3]  # dim=3
+
+    mock_glide_module = MagicMock()
+    mock_glide_module.ft.create.return_value = "OK"
+    mock_glide_module.ft.search.return_value = []
+
+    with patch("runtime.node.agent.memory.valkey_memory._get_glide_sync") as mock_get_glide, \
+         patch("runtime.node.agent.memory.valkey_memory._make_client") as mock_make_client, \
+         patch("runtime.node.agent.memory.valkey_memory.EmbeddingFactory") as mock_factory:
+        mock_get_glide.return_value = mock_glide_module
+        mock_make_client.return_value = mock_client
+        mock_factory.create_embedding.return_value = mock_embedding
+
+        from runtime.node.agent.memory.valkey_memory import ValkeyMemory
+        memory = ValkeyMemory(store)
+        # Attach the glide module mock so tests can inspect ft.create / ft.search calls
+        memory._glide = mock_glide_module
+        return memory, mock_client, mock_embedding
+
+
+# ---------------------------------------------------------------------------
+# Instantiation
+# ---------------------------------------------------------------------------
+
+class TestValkeyMemoryInstantiation:
+
+    def test_instantiation_creates_ft_index(self):
+        """ValkeyMemory creates FT index at __init__ time."""
+        memory, client, _ = _make_valkey_memory()
+        memory._glide.ft.create.assert_called_once()
+        args = memory._glide.ft.create.call_args[0]
+        assert args[1] == "chatdev_memory"  # index_name is second positional arg
+
+    def test_instantiation_idempotent_when_index_exists(self):
+        """ValkeyMemory silently ignores 'index already exists' error."""
+        store, _ = _make_store()
+        mock_client = MagicMock()
+        mock_embedding = MagicMock()
+        mock_embedding.get_embedding.return_value = [0.1, 0.2, 0.3]
+        mock_glide_module = MagicMock()
+        mock_glide_module.ft.create.side_effect = Exception("Index already exists")
+
+        with patch("runtime.node.agent.memory.valkey_memory._get_glide_sync") as mock_get_glide, \
+             patch("runtime.node.agent.memory.valkey_memory._make_client") as mock_make_client, \
+             patch("runtime.node.agent.memory.valkey_memory.EmbeddingFactory") as mock_factory:
+            mock_get_glide.return_value = mock_glide_module
+            mock_make_client.return_value = mock_client
+            mock_factory.create_embedding.return_value = mock_embedding
+
+            from runtime.node.agent.memory.valkey_memory import ValkeyMemory
+            ValkeyMemory(store)  # Should not raise
+
+    def test_instantiation_raises_on_missing_search_module(self):
+        """ValkeyMemory raises RuntimeError when Search module is absent."""
+        store, _ = _make_store()
+        mock_client = MagicMock()
+        mock_embedding = MagicMock()
+        mock_embedding.get_embedding.return_value = [0.1, 0.2, 0.3]
+        mock_glide_module = MagicMock()
+        mock_glide_module.ft.create.side_effect = Exception("unknown command ft.create")
+
+        with patch("runtime.node.agent.memory.valkey_memory._get_glide_sync") as mock_get_glide, \
+             patch("runtime.node.agent.memory.valkey_memory._make_client") as mock_make_client, \
+             patch("runtime.node.agent.memory.valkey_memory.EmbeddingFactory") as mock_factory:
+            mock_get_glide.return_value = mock_glide_module
+            mock_make_client.return_value = mock_client
+            mock_factory.create_embedding.return_value = mock_embedding
+
+            from runtime.node.agent.memory.valkey_memory import ValkeyMemory
+            with pytest.raises(RuntimeError, match="Search module"):
+                ValkeyMemory(store)
+
+    def test_raises_on_wrong_config_type(self):
+        """ValkeyMemory raises ValueError when store has wrong config type."""
         from runtime.node.agent.memory.valkey_memory import ValkeyMemory
 
-        mem = ValkeyMemory(valkey_store)
-        yield mem
-        # Cleanup: drop index and keys
-        # mem._cleanup_test_data()
+        store = MagicMock()
+        store.name = "bad"
+        store.as_config.return_value = None
 
-    def test_load_is_noop(self, memory):
-        """load() completes without error (server handles persistence)."""
-        memory.load()
+        with patch("runtime.node.agent.memory.valkey_memory._get_glide_sync"), \
+             patch("runtime.node.agent.memory.valkey_memory._make_client"):
+            with pytest.raises(ValueError, match="ValkeyMemoryConfig"):
+                ValkeyMemory(store)
 
-    def test_save_is_noop(self, memory):
-        """save() completes without error (server handles persistence)."""
-        memory.save()
 
-    def test_update_stores_memory(self, memory):
-        """update() writes a memory item to Valkey as a hash."""
-        from runtime.node.agent.memory.memory_base import (
-            MemoryContentSnapshot,
-            MemoryWritePayload,
-        )
+# ---------------------------------------------------------------------------
+# Update
+# ---------------------------------------------------------------------------
+
+class TestValkeyMemoryUpdate:
+
+    def test_update_stores_hash(self):
+        """update() calls hset with expected fields."""
+        memory, client, embedding = _make_valkey_memory()
+        embedding.get_embedding.return_value = [0.5, 0.6, 0.7]
 
         payload = MemoryWritePayload(
-            agent_role="writer",
-            inputs_text="The capital of France is Paris",
-            input_snapshot=MemoryContentSnapshot(text="The capital of France is Paris"),
-            output_snapshot=MemoryContentSnapshot(text="Noted."),
-        )
-        memory.update(payload)
-        # Verify key exists in Valkey
-        # assert memory.count_memories() >= 1
-
-    def test_retrieve_returns_relevant_items(self, memory):
-        """retrieve() finds stored memories via KNN search."""
-        from runtime.node.agent.memory.memory_base import (
-            MemoryContentSnapshot,
-            MemoryWritePayload,
-        )
-
-        # Store a fact
-        payload = MemoryWritePayload(
-            agent_role="writer",
-            inputs_text="Python was created by Guido van Rossum",
-            input_snapshot=MemoryContentSnapshot(text="Python was created by Guido van Rossum"),
+            agent_role="coder",
+            inputs_text="I prefer Python",
+            input_snapshot=None,
             output_snapshot=None,
         )
         memory.update(payload)
 
-        # Query for it
-        query = MemoryContentSnapshot(text="Who created Python?")
-        results = memory.retrieve("writer", query, top_k=3, similarity_threshold=-1.0)
+        client.hset.assert_called_once()
+        args = client.hset.call_args
+        key = args[0][0]
+        fields = args[0][1]
+        assert key.startswith("memory:")
+        assert fields["content_summary"] == "I prefer Python"
+        assert fields["agent_role"] == "coder"
+        assert "embedding" in fields
+        assert "timestamp" in fields
 
-        assert len(results) >= 1
-        assert "Python" in results[0].content_summary or "Guido" in results[0].content_summary
+    def test_update_embedding_bytes_are_float32(self):
+        """update() encodes embedding as packed float32 bytes."""
+        memory, client, embedding = _make_valkey_memory()
+        vec = [0.1, 0.2, 0.3]
+        embedding.get_embedding.return_value = vec
 
-    def test_retrieve_empty_query_returns_empty(self, memory):
-        """Empty query returns empty list without searching."""
-        from runtime.node.agent.memory.memory_base import MemoryContentSnapshot
+        payload = MemoryWritePayload(
+            agent_role="writer",
+            inputs_text="test",
+            input_snapshot=None,
+            output_snapshot=None,
+        )
+        memory.update(payload)
 
-        query = MemoryContentSnapshot(text="   ")
-        results = memory.retrieve("writer", query, top_k=3, similarity_threshold=-1.0)
+        fields = client.hset.call_args[0][1]
+        expected_bytes = struct.pack("3f", *vec)
+        assert fields["embedding"] == expected_bytes
+
+    def test_update_with_ttl_calls_expire(self):
+        """update() calls expire on the key when ttl_seconds is configured."""
+        memory, client, _ = _make_valkey_memory(ttl_seconds=3600)
+
+        payload = MemoryWritePayload(
+            agent_role="writer",
+            inputs_text="test input",
+            input_snapshot=None,
+            output_snapshot=None,
+        )
+        memory.update(payload)
+
+        client.expire.assert_called_once()
+        expire_args = client.expire.call_args[0]
+        assert expire_args[1] == 3600
+
+    def test_update_without_ttl_does_not_call_expire(self):
+        """update() does not call expire when ttl_seconds is None."""
+        memory, client, _ = _make_valkey_memory(ttl_seconds=None)
+
+        payload = MemoryWritePayload(
+            agent_role="writer",
+            inputs_text="test input",
+            input_snapshot=None,
+            output_snapshot=None,
+        )
+        memory.update(payload)
+
+        client.expire.assert_not_called()
+
+    def test_update_empty_input_is_noop(self):
+        """update() with empty inputs_text skips hset."""
+        memory, client, _ = _make_valkey_memory()
+
+        payload = MemoryWritePayload(
+            agent_role="writer",
+            inputs_text="   ",
+            input_snapshot=None,
+            output_snapshot=None,
+        )
+        memory.update(payload)
+
+        client.hset.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Retrieve
+# ---------------------------------------------------------------------------
+
+class TestValkeyMemoryRetrieve:
+
+    def _ft_result(self, docs):
+        """Build a ft.search return value: [count, {key: {fields}}, ...]
+        docs: list of (key, content, agent_role, distance) tuples.
+        """
+        result = [len(docs)]
+        for key, content, role, distance in docs:
+            result.append({
+                key.encode(): {
+                    b"content_summary": content.encode(),
+                    b"agent_role": role.encode(),
+                    b"timestamp": b"1700000000.0",
+                    b"__embedding_score": str(distance).encode(),
+                }
+            })
+        return result
+
+    def test_retrieve_returns_memory_items(self):
+        """retrieve() returns MemoryItem list from ft.search results."""
+        memory, client, embedding = _make_valkey_memory()
+        embedding.get_embedding.return_value = [0.1, 0.2, 0.3]
+        memory._glide.ft.search.return_value = self._ft_result([
+            ("memory:abc", "Python is great", "coder", 0.05),
+        ])
+
+        query = MemoryContentSnapshot(text="Python")
+        results = memory.retrieve("coder", query, top_k=3, similarity_threshold=-1.0)
+
+        assert len(results) == 1
+        assert results[0].content_summary == "Python is great"
+        assert results[0].metadata["source"] == "valkey"
+
+    def test_retrieve_searches_all_roles(self):
+        """retrieve() searches all memories regardless of agent_role (consistent with SimpleMemory)."""
+        memory, client, embedding = _make_valkey_memory()
+        embedding.get_embedding.return_value = [0.1, 0.2, 0.3]
+        memory._glide.ft.search.return_value = []
+
+        query = MemoryContentSnapshot(text="test")
+        memory.retrieve("designer", query, top_k=5, similarity_threshold=-1.0)
+
+        ft_query_arg = memory._glide.ft.search.call_args[0][2]
+        # Should use wildcard KNN, not role-specific filter
+        assert "*=>[KNN" in ft_query_arg
+
+    def test_retrieve_threshold_filtering(self):
+        """retrieve() excludes results below similarity_threshold."""
+        memory, client, embedding = _make_valkey_memory()
+        embedding.get_embedding.return_value = [0.1, 0.2, 0.3]
+        # distance=0.8 -> similarity=0.2, below threshold of 0.5
+        memory._glide.ft.search.return_value = self._ft_result([
+            ("memory:a", "low relevance", "coder", 0.8),
+        ])
+
+        query = MemoryContentSnapshot(text="test")
+        results = memory.retrieve("coder", query, top_k=5, similarity_threshold=0.5)
+
         assert results == []
 
-    def test_retrieve_respects_top_k(self, memory):
-        """Number of results does not exceed top_k."""
-        from runtime.node.agent.memory.memory_base import (
-            MemoryContentSnapshot,
-            MemoryWritePayload,
-        )
+    def test_retrieve_threshold_passes_high_similarity(self):
+        """retrieve() includes results at or above similarity_threshold."""
+        memory, client, embedding = _make_valkey_memory()
+        embedding.get_embedding.return_value = [0.1, 0.2, 0.3]
+        # distance=0.1 -> similarity=0.9
+        memory._glide.ft.search.return_value = self._ft_result([
+            ("memory:a", "high relevance", "coder", 0.1),
+        ])
 
-        # Store multiple items
-        for i in range(5):
-            payload = MemoryWritePayload(
-                agent_role="writer",
-                inputs_text=f"Fact number {i} about testing",
-                input_snapshot=MemoryContentSnapshot(text=f"Fact number {i} about testing"),
-                output_snapshot=None,
-            )
-            memory.update(payload)
+        query = MemoryContentSnapshot(text="test")
+        results = memory.retrieve("coder", query, top_k=5, similarity_threshold=0.5)
 
-        query = MemoryContentSnapshot(text="testing facts")
-        results = memory.retrieve("writer", query, top_k=2, similarity_threshold=-1.0)
-        assert len(results) <= 2
+        assert len(results) == 1
 
-    def test_ttl_expiry(self, memory):
-        """Items expire after ttl_seconds (would need time manipulation or short TTL)."""
-        # This test would require either:
-        # 1. Setting ttl_seconds=1 and sleeping
-        # 2. Using Valkey's DEBUG SLEEP or TIME commands
-        pass
+    def test_retrieve_ordered_by_similarity_descending(self):
+        """retrieve() returns results ordered by descending cosine similarity."""
+        memory, client, embedding = _make_valkey_memory()
+        embedding.get_embedding.return_value = [0.1, 0.2, 0.3]
+        memory._glide.ft.search.return_value = self._ft_result([
+            ("memory:a", "less relevant", "coder", 0.4),   # similarity=0.6
+            ("memory:b", "most relevant", "coder", 0.1),   # similarity=0.9
+            ("memory:c", "middle", "coder", 0.2),          # similarity=0.8
+        ])
 
-    def test_index_created_lazily(self, memory):
-        """Index is created on first use, not at construction time."""
-        # Verify FT.INFO raises (no index) before first operation
-        # Then after first update, FT.INFO succeeds
-        pass
+        query = MemoryContentSnapshot(text="test")
+        results = memory.retrieve("coder", query, top_k=5, similarity_threshold=-1.0)
 
-    def test_import_error_without_glide(self):
-        """Clear ImportError when valkey-glide is not installed."""
-        with patch.dict("sys.modules", {"glide": None}):
-            with pytest.raises(ImportError, match="valkey-glide"):
-                from runtime.node.agent.memory import valkey_memory  # noqa: F401
-                # Force re-import
-                import importlib
-                importlib.reload(valkey_memory)
+        assert results[0].content_summary == "most relevant"
+        assert results[1].content_summary == "middle"
+        assert results[2].content_summary == "less relevant"
+
+    def test_retrieve_empty_query_returns_empty(self):
+        """retrieve() returns empty list for blank query without calling ft.search."""
+        memory, client, _ = _make_valkey_memory()
+
+        query = MemoryContentSnapshot(text="   ")
+        results = memory.retrieve("coder", query, top_k=3, similarity_threshold=-1.0)
+
+        assert results == []
+        memory._glide.ft.search.assert_not_called()
+
+    def test_retrieve_search_error_returns_empty(self):
+        """retrieve() returns empty list when ft.search raises."""
+        memory, client, embedding = _make_valkey_memory()
+        embedding.get_embedding.return_value = [0.1, 0.2, 0.3]
+        memory._glide.ft.search.side_effect = Exception("connection error")
+
+        query = MemoryContentSnapshot(text="test")
+        results = memory.retrieve("coder", query, top_k=3, similarity_threshold=-1.0)
+
+        assert results == []
+
+    def test_retrieve_no_threshold_passes_all(self):
+        """retrieve() with threshold=-1.0 returns all results regardless of similarity."""
+        memory, client, embedding = _make_valkey_memory()
+        embedding.get_embedding.return_value = [0.1, 0.2, 0.3]
+        memory._glide.ft.search.return_value = self._ft_result([
+            ("memory:a", "very low", "coder", 0.99),  # similarity=0.01
+        ])
+
+        query = MemoryContentSnapshot(text="test")
+        results = memory.retrieve("coder", query, top_k=5, similarity_threshold=-1.0)
+
+        assert len(results) == 1
+
+
+# ---------------------------------------------------------------------------
+# Count memories
+# ---------------------------------------------------------------------------
+
+class TestValkeyMemoryCount:
+
+    def test_count_memories_returns_num_docs(self):
+        """count_memories() returns num_docs from ft.info."""
+        memory, client, _ = _make_valkey_memory()
+        memory._glide.ft.info.return_value = {b"num_docs": 3}
+
+        assert memory.count_memories() == 3
+
+    def test_count_memories_empty(self):
+        """count_memories() returns 0 when index has no docs."""
+        memory, client, _ = _make_valkey_memory()
+        memory._glide.ft.info.return_value = {b"num_docs": 0}
+
+        assert memory.count_memories() == 0
+
+    def test_count_memories_error_returns_zero(self):
+        """count_memories() returns 0 on error."""
+        memory, client, _ = _make_valkey_memory()
+        memory._glide.ft.info.side_effect = Exception("connection error")
+
+        assert memory.count_memories() == 0
+
+
+# ---------------------------------------------------------------------------
+# Load / Save no-ops
+# ---------------------------------------------------------------------------
+
+class TestValkeyMemoryLoadSave:
+
+    def test_load_is_noop(self):
+        """load() does nothing for server-managed store."""
+        memory, _, _ = _make_valkey_memory()
+        memory.load()  # Should not raise
+
+    def test_save_is_noop(self):
+        """save() does nothing for server-managed store."""
+        memory, _, _ = _make_valkey_memory()
+        memory.save()  # Should not raise
+
+
+# ---------------------------------------------------------------------------
+# Lazy import error
+# ---------------------------------------------------------------------------
+
+class TestValkeyMemoryLazyImport:
+
+    def test_import_error_when_valkey_glide_missing(self):
+        """Helpful ImportError when valkey-glide is not installed."""
+        from runtime.node.agent.memory.valkey_memory import _get_glide_sync
+
+        with patch.dict("sys.modules", {"glide_sync": None}):
+            with pytest.raises(ImportError, match="valkey-glide-sync is required"):
+                _get_glide_sync()
