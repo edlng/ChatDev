@@ -55,7 +55,7 @@ class TestValkeyMemoryConfigFromDict:
         assert cfg.embedding.model == "text-embedding-3-small"
 
     def test_invalid_port_zero(self):
-        """Port must be positive."""
+        """Port must be at least 1."""
         with pytest.raises(ConfigError, match="port"):
             ValkeyMemoryConfig.from_dict({"port": 0}, path="test")
 
@@ -69,10 +69,20 @@ class TestValkeyMemoryConfigFromDict:
         with pytest.raises(ConfigError, match="port"):
             ValkeyMemoryConfig.from_dict({"port": "6379"}, path="test")
 
+    def test_invalid_port_too_high(self):
+        """Port above 65535 rejected."""
+        with pytest.raises(ConfigError, match="port"):
+            ValkeyMemoryConfig.from_dict({"port": 65536}, path="test")
+
     def test_invalid_db_negative(self):
         """Negative db index rejected."""
         with pytest.raises(ConfigError, match="db"):
             ValkeyMemoryConfig.from_dict({"db": -1}, path="test")
+
+    def test_invalid_db_too_high(self):
+        """Database index above 15 rejected."""
+        with pytest.raises(ConfigError, match="db"):
+            ValkeyMemoryConfig.from_dict({"db": 16}, path="test")
 
     def test_invalid_ttl_zero(self):
         """TTL must be positive if specified."""
@@ -89,14 +99,10 @@ class TestValkeyMemoryConfigFromDict:
         with pytest.raises(ConfigError, match="ttl_seconds"):
             ValkeyMemoryConfig.from_dict({"ttl_seconds": "3600"}, path="test")
 
-    def test_ttl_none_when_omitted(self):
-        """TTL is None when not specified (no expiry)."""
+    def test_optional_fields_none_when_omitted(self):
+        """TTL and embedding are None when not specified."""
         cfg = ValkeyMemoryConfig.from_dict({"host": "localhost"}, path="test")
         assert cfg.ttl_seconds is None
-
-    def test_embedding_none_when_omitted(self):
-        """Embedding config is None when not provided."""
-        cfg = ValkeyMemoryConfig.from_dict({"host": "localhost"}, path="test")
         assert cfg.embedding is None
 
     def test_embedding_none_when_explicitly_null(self):
@@ -228,6 +234,8 @@ class TestValkeyMemoryIntegration:
     Prerequisites:
     - Valkey server running on localhost:6379
     - Valkey Search module loaded (valkey-server --loadmodule valkeysearch.so)
+    - Or use the valkey/valkey-bundle Docker image which includes Search:
+      docker run -p 6379:6379 valkey/valkey-bundle:latest
     - valkey-glide installed (pip install .[valkey])
 
     Run with: pytest tests/test_valkey_memory.py::TestValkeyMemoryIntegration -v --no-header

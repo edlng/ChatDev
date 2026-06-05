@@ -208,14 +208,14 @@ class ValkeyMemoryConfig(BaseConfig):
         host = optional_str(mapping, "host", path) or "localhost"
 
         port_value = mapping.get("port", 6379)
-        if not isinstance(port_value, int) or port_value <= 0:
-            raise ConfigError("port must be a positive integer", extend_path(path, "port"))
+        if not isinstance(port_value, int) or port_value < 1 or port_value > 65535:
+            raise ConfigError("port must be a valid port number (1-65535)", extend_path(path, "port"))
 
         password = optional_str(mapping, "password", path)
 
         db_value = mapping.get("db", 0)
-        if not isinstance(db_value, int) or db_value < 0:
-            raise ConfigError("db must be a non-negative integer", extend_path(path, "db"))
+        if not isinstance(db_value, int) or db_value < 0 or db_value > 15:
+            raise ConfigError("db must be a valid database index (0-15)", extend_path(path, "db"))
 
         index_name = optional_str(mapping, "index_name", path) or "memory_index"
 
