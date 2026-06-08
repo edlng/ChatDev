@@ -419,6 +419,20 @@ class TestValkeyMemoryConnectionOptions:
             assert call_args[2] == "myuser"  # username
             assert call_args[3] == "mypass"  # password
 
+    def test_client_name_set_in_configuration(self):
+        """_make_client sets client_name='chatdev_memory_client' for server-side identification."""
+        from runtime.node.agent.memory.valkey_memory import _make_client
+
+        mock_glide_module = MagicMock()
+
+        with patch("runtime.node.agent.memory.valkey_memory._get_glide_sync") as mock_get_glide:
+            mock_get_glide.return_value = mock_glide_module
+            _make_client("localhost", 6379)
+
+            # Verify GlideClientConfiguration was called with client_name
+            config_call = mock_glide_module.GlideClientConfiguration.call_args
+            assert config_call[1]["client_name"] == "chatdev_memory_client"
+
 
 # ---------------------------------------------------------------------------
 # Tag sanitization
