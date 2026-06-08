@@ -40,6 +40,7 @@ def _make_client(host: str, port: int, username: str | None = None, password: st
         addresses=[glide_sync.NodeAddress(host, port)],
         use_tls=use_tls,
         credentials=credentials,
+        client_name="chatdev_memory_client",
         database_id=db if db != 0 else None,
     )
     return glide_sync.GlideClient.create(config)
