@@ -159,6 +159,7 @@ nodes:
   | `username` | ACL 用户名 | `None` |
   | `password` | 认证密码 | `None` |
   | `db` | 数据库索引（0-15） | `0` |
+  | `use_tls` | 启用 TLS 加密连接 | `false` |
   | `index_name` | FT 索引名称 | `memory_index` |
   | `key_prefix` | Hash key 前缀 | `memory:` |
   | `ttl_seconds` | 记忆过期时间（秒），`None` 表示永不过期 | `None` |
