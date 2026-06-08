@@ -87,7 +87,7 @@ class ValkeyMemory(MemoryBase):
         dim = len(test_vec)
 
         schema = [
-            glide_sync.TextField("content_summary"),
+            glide_sync.TagField("content_summary"),
             glide_sync.TagField("agent_role"),
             glide_sync.NumericField("timestamp"),
             glide_sync.VectorField(
@@ -100,7 +100,7 @@ class ValkeyMemory(MemoryBase):
                 ),
             ),
         ]
-        options = glide_sync.FtCreateOptions(prefixes=[self.config.key_prefix])
+        options = glide_sync.FtCreateOptions(glide_sync.DataType.HASH, prefixes=[self.config.key_prefix])
 
         try:
             glide_sync.ft.create(self._client, self.config.index_name, schema, options)
