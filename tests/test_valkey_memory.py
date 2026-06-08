@@ -25,8 +25,10 @@ class TestValkeyMemoryConfigFromDict:
         cfg = ValkeyMemoryConfig.from_dict({}, path="test")
         assert cfg.host == "localhost"
         assert cfg.port == 6379
+        assert cfg.username is None
         assert cfg.password is None
         assert cfg.db == 0
+        assert cfg.use_tls is False
         assert cfg.index_name == "memory_index"
         assert cfg.key_prefix == "memory:"
         assert cfg.ttl_seconds is None
@@ -37,8 +39,10 @@ class TestValkeyMemoryConfigFromDict:
         data = {
             "host": "valkey.internal",
             "port": 6380,
+            "username": "admin",
             "password": "secret",
             "db": 2,
+            "use_tls": True,
             "index_name": "chatdev_memory",
             "key_prefix": "agent:",
             "ttl_seconds": 86400,
@@ -50,8 +54,10 @@ class TestValkeyMemoryConfigFromDict:
         cfg = ValkeyMemoryConfig.from_dict(data, path="test")
         assert cfg.host == "valkey.internal"
         assert cfg.port == 6380
+        assert cfg.username == "admin"
         assert cfg.password == "secret"
         assert cfg.db == 2
+        assert cfg.use_tls is True
         assert cfg.index_name == "chatdev_memory"
         assert cfg.key_prefix == "agent:"
         assert cfg.ttl_seconds == 86400
@@ -122,7 +128,7 @@ class TestValkeyMemoryConfigFieldSpecs:
     def test_field_specs_defined(self):
         """All expected fields have specs."""
         specs = ValkeyMemoryConfig.field_specs()
-        expected_fields = {"host", "port", "password", "db", "index_name", "key_prefix", "ttl_seconds", "embedding"}
+        expected_fields = {"host", "port", "username", "password", "db", "use_tls", "index_name", "key_prefix", "ttl_seconds", "embedding"}
         assert expected_fields.issubset(set(specs.keys()))
 
     def test_host_not_required(self):
@@ -240,6 +246,9 @@ def _make_store(
     port=6379,
     index_name="chatdev_memory",
     ttl_seconds=None,
+    username=None,
+    password=None,
+    use_tls=False,
 ):
     """Build a minimal MemoryStoreConfig mock for ValkeyMemory."""
     valkey_cfg = MagicMock(spec=ValkeyMemoryConfig)
@@ -248,9 +257,10 @@ def _make_store(
     valkey_cfg.index_name = index_name
     valkey_cfg.ttl_seconds = ttl_seconds
     valkey_cfg.key_prefix = "memory:"
-    valkey_cfg.username = None
-    valkey_cfg.password = None
+    valkey_cfg.username = username
+    valkey_cfg.password = password
     valkey_cfg.db = 0
+    valkey_cfg.use_tls = use_tls
     valkey_cfg.embedding = MagicMock()  # non-None so embedding branch is taken
 
     store = MagicMock()
@@ -265,9 +275,9 @@ def _make_store(
     return store, valkey_cfg
 
 
-def _make_valkey_memory(host="localhost", port=6379, ttl_seconds=None):
+def _make_valkey_memory(host="localhost", port=6379, ttl_seconds=None, username=None, password=None, use_tls=False):
     """Create a ValkeyMemory with mocked glide_sync client and embedding."""
-    store, valkey_cfg = _make_store(host=host, port=port, ttl_seconds=ttl_seconds)
+    store, valkey_cfg = _make_store(host=host, port=port, ttl_seconds=ttl_seconds, username=username, password=password, use_tls=use_tls)
 
     mock_client = MagicMock()
     mock_embedding = MagicMock()
@@ -355,6 +365,96 @@ class TestValkeyMemoryInstantiation:
              patch("runtime.node.agent.memory.valkey_memory._make_client"):
             with pytest.raises(ValueError, match="ValkeyMemoryConfig"):
                 ValkeyMemory(store)
+
+
+# ---------------------------------------------------------------------------
+# Connection options (TLS, username)
+# ---------------------------------------------------------------------------
+
+class TestValkeyMemoryConnectionOptions:
+
+    def test_use_tls_passed_to_make_client(self):
+        """use_tls=True is forwarded to _make_client."""
+        store, _ = _make_store(use_tls=True, password="secret", username="admin")
+        mock_client = MagicMock()
+        mock_embedding = MagicMock()
+        mock_embedding.get_embedding.return_value = [0.1, 0.2, 0.3]
+        mock_glide_module = MagicMock()
+        mock_glide_module.ft.create.return_value = "OK"
+
+        with patch("runtime.node.agent.memory.valkey_memory._get_glide_sync") as mock_get_glide, \
+             patch("runtime.node.agent.memory.valkey_memory._make_client") as mock_make_client, \
+             patch("runtime.node.agent.memory.valkey_memory.EmbeddingFactory") as mock_factory:
+            mock_get_glide.return_value = mock_glide_module
+            mock_make_client.return_value = mock_client
+            mock_factory.create_embedding.return_value = mock_embedding
+
+            from runtime.node.agent.memory.valkey_memory import ValkeyMemory
+            ValkeyMemory(store)
+
+            mock_make_client.assert_called_once_with(
+                "localhost", 6379, "admin", "secret", 0, True
+            )
+
+    def test_username_passed_to_make_client(self):
+        """username is forwarded to _make_client when provided."""
+        store, _ = _make_store(username="myuser", password="mypass")
+        mock_client = MagicMock()
+        mock_embedding = MagicMock()
+        mock_embedding.get_embedding.return_value = [0.1, 0.2, 0.3]
+        mock_glide_module = MagicMock()
+        mock_glide_module.ft.create.return_value = "OK"
+
+        with patch("runtime.node.agent.memory.valkey_memory._get_glide_sync") as mock_get_glide, \
+             patch("runtime.node.agent.memory.valkey_memory._make_client") as mock_make_client, \
+             patch("runtime.node.agent.memory.valkey_memory.EmbeddingFactory") as mock_factory:
+            mock_get_glide.return_value = mock_glide_module
+            mock_make_client.return_value = mock_client
+            mock_factory.create_embedding.return_value = mock_embedding
+
+            from runtime.node.agent.memory.valkey_memory import ValkeyMemory
+            ValkeyMemory(store)
+
+            call_args = mock_make_client.call_args[0]
+            assert call_args[2] == "myuser"  # username
+            assert call_args[3] == "mypass"  # password
+
+
+# ---------------------------------------------------------------------------
+# Tag sanitization
+# ---------------------------------------------------------------------------
+
+class TestValkeyMemorySanitizeTag:
+
+    def test_sanitize_tag_removes_commas(self):
+        """Commas in agent_role are replaced with underscores."""
+        from runtime.node.agent.memory.valkey_memory import ValkeyMemory
+        assert ValkeyMemory._sanitize_tag("role,with,commas") == "role_with_commas"
+
+    def test_sanitize_tag_removes_braces(self):
+        """Braces are replaced."""
+        from runtime.node.agent.memory.valkey_memory import ValkeyMemory
+        assert ValkeyMemory._sanitize_tag("{admin}") == "_admin_"
+
+    def test_sanitize_tag_removes_spaces(self):
+        """Spaces are replaced."""
+        from runtime.node.agent.memory.valkey_memory import ValkeyMemory
+        assert ValkeyMemory._sanitize_tag("my role") == "my_role"
+
+    def test_sanitize_tag_removes_pipes(self):
+        """Pipes are replaced."""
+        from runtime.node.agent.memory.valkey_memory import ValkeyMemory
+        assert ValkeyMemory._sanitize_tag("a|b") == "a_b"
+
+    def test_sanitize_tag_empty_string(self):
+        """Empty string returns empty."""
+        from runtime.node.agent.memory.valkey_memory import ValkeyMemory
+        assert ValkeyMemory._sanitize_tag("") == ""
+
+    def test_sanitize_tag_clean_input_unchanged(self):
+        """Clean input passes through unchanged."""
+        from runtime.node.agent.memory.valkey_memory import ValkeyMemory
+        assert ValkeyMemory._sanitize_tag("coder") == "coder"
 
 
 # ---------------------------------------------------------------------------
